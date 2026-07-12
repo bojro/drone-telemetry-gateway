@@ -1,0 +1,48 @@
+# Go binaries — this project builds ./cmd/gateway and ./cmd/simulator.
+# Never commit compiled output; it's rebuildable and platform-specific.
+/gateway
+/simulator
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage output
+*.test
+*.out
+coverage.*
+/cover.html
+
+# Go workspace file (machine-local; do not commit)
+go.work
+go.work.sum
+
+# Dependency vendor dir — only commit this if you deliberately vendor; default is not to.
+/vendor/
+
+# Environment / secrets — config comes from env vars (12-factor). NEVER commit real values.
+.env
+.env.*
+*.local
+
+# Local data / logs from running the gateway or Postgres/Mosquitto volumes
+*.log
+/data/
+/tmp/
+mosquitto/data/
+mosquitto/log/
+postgres-data/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
