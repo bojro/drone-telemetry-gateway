@@ -1,0 +1,17 @@
+# Local infrastructure for the gateway. `docker compose up -d postgres` starts a
+# Postgres instance the gateway writes to in "full" mode. Mosquitto (MQTT) joins here
+# in Part 05.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports:
+      - "5432:5432" # host:container — reach it from the host at localhost:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
