@@ -1,5 +1,6 @@
 // Command gateway wires and runs the telemetry pipeline. Readings flow from the
 // simulator into a bounded queue, where a pool of workers drains them into a store.
+// MODE=local uses an in-memory store; MODE=full uses Postgres.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bojro/drone-telemetry-gateway/internal/config"
 	"github.com/bojro/drone-telemetry-gateway/internal/gateway"
 	"github.com/bojro/drone-telemetry-gateway/internal/model"
 	"github.com/bojro/drone-telemetry-gateway/internal/source"
@@ -17,48 +19,54 @@ import (
 )
 
 func main() {
+	cfg := config.Load()
+
 	// ctx's Done() channel closes on Ctrl-C (SIGINT/SIGTERM).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Store: in-memory for now; Part 04 swaps in Postgres behind the same interface.
-	st := store.NewMemoryStore()
+	// Store: memory (local) or Postgres (full), selected by MODE. Both satisfy the same
+	// Store interface, so nothing below this block cares which one it is.
+	var st store.Store
+	if cfg.Mode == "full" {
+		ps, err := store.NewPostgresStore(ctx, cfg.PostgresURL)
+		if err != nil {
+			log.Fatalf("postgres: %v", err)
+		}
+		st = ps
+	} else {
+		st = store.NewMemoryStore()
+	}
 	defer st.Close()
 
-	// The bounded queue: capacity 100, backpressure (block) when full.
-	q := gateway.NewQueue(100, false)
+	// The bounded queue, sized and policy'd from config.
+	q := gateway.NewQueue(cfg.QueueSize, cfg.DropOnFull)
 
 	// The sink enqueues each reading through the queue's policy.
 	sink := func(r model.Reading) {
 		q.Enqueue(ctx, r)
 	}
 
-	// Producer: the simulator, tracked by a WaitGroup so shutdown can wait for it to
-	// fully stop before closing the queue. More producers would just join this group.
-	sim := &source.Simulator{Devices: 3, Interval: time.Second}
+	// Producer: the simulator, tracked by a WaitGroup so shutdown can wait for it.
+	sim := &source.Simulator{Devices: cfg.Devices, Interval: time.Second}
 	var producers sync.WaitGroup
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
-		sim.Run(ctx, sink) // returns when ctx is cancelled
+		sim.Run(ctx, sink)
 	}()
 
-	// Worker pool: a fixed set of workers drains the queue into the store.
-	pool := gateway.NewPool(4, q.C(), st)
+	// Worker pool drains the queue into the store.
+	pool := gateway.NewPool(cfg.Workers, q.C(), st)
 	pool.Start()
-	log.Println("gateway: 4 workers persisting to the store (Ctrl-C to stop)")
+	log.Printf("gateway: mode=%s workers=%d queue=%d (Ctrl-C to stop)", cfg.Mode, cfg.Workers, cfg.QueueSize)
 
-	// Graceful shutdown, in order — the ordering is the whole point:
+	// Graceful shutdown, in order:
 	<-ctx.Done()     // 1. Ctrl-C fired
-	producers.Wait() // 2. stop producers: no more Enqueue can happen
-	q.Close()        // 3. close the queue: worker range loops end after draining
-	pool.Wait()      // 4. drain workers: block until every one has finished and exited
+	producers.Wait() // 2. stop producers
+	q.Close()        // 3. close the queue
+	pool.Wait()      // 4. drain workers
 
-	// Confirm the pipeline persisted end to end.
 	n, _ := st.Count(context.Background())
-	if r, ok, _ := st.Latest(context.Background(), "drone-1"); ok {
-		log.Printf("gateway: drained and stopped — %d stored, latest drone-1 battery %.1f%%", n, r.Battery)
-	} else {
-		log.Printf("gateway: drained and stopped — %d stored", n)
-	}
+	log.Printf("gateway: drained and stopped — %d stored", n)
 }
