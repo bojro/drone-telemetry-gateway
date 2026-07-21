@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,19 +28,25 @@ func main() {
 		q.Enqueue(ctx, r)
 	}
 
-	// Producer: run the simulator in its own goroutine. When ctx is cancelled it
-	// returns, then we close the queue so the workers' range loops can drain and end.
+	// Producer: the simulator, tracked by a WaitGroup so shutdown can wait for it to
+	// fully stop before closing the queue. More producers would just join this group.
 	sim := &source.Simulator{Devices: 3, Interval: time.Second}
+	var producers sync.WaitGroup
+	producers.Add(1)
 	go func() {
-		sim.Run(ctx, sink)
-		q.Close()
+		defer producers.Done()
+		sim.Run(ctx, sink) // returns when ctx is cancelled
 	}()
 
 	// Worker pool: a fixed set of workers drains the queue concurrently.
 	pool := gateway.NewPool(4, q.C())
 	pool.Start()
-
 	log.Println("gateway: 4 workers draining the queue (Ctrl-C to stop)")
-	pool.Wait() // blocks until the queue is closed+drained and every worker has exited
+
+	// Graceful shutdown, in order — the ordering is the whole point:
+	<-ctx.Done()     // 1. Ctrl-C fired
+	producers.Wait() // 2. stop producers: no more Enqueue can happen
+	q.Close()        // 3. close the queue: worker range loops end after draining
+	pool.Wait()      // 4. drain workers: block until every one has finished and exited
 	log.Println("gateway: drained and stopped")
 }
