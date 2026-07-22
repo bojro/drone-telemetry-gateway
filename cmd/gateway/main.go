@@ -67,8 +67,13 @@ func main() {
 		}
 	}()
 
-	// Worker pool drains the queue into the store.
-	pool := gateway.NewPool(cfg.Workers, q.C(), st)
+	// Retry manager: absorbs failed writes so a database outage loses no data. Runs in
+	// its own goroutine; workers hand failed saves to it.
+	retrier := gateway.NewRetrier(cfg.QueueSize*4, st)
+	go retrier.Run(ctx)
+
+	// Worker pool drains the queue into the store, diverting failed writes to the retrier.
+	pool := gateway.NewPool(cfg.Workers, q.C(), st, retrier)
 	pool.Start()
 	log.Printf("gateway: mode=%s workers=%d queue=%d (Ctrl-C to stop)", cfg.Mode, cfg.Workers, cfg.QueueSize)
 
