@@ -77,6 +77,16 @@ func main() {
 	pool.Start()
 	log.Printf("gateway: mode=%s workers=%d queue=%d (Ctrl-C to stop)", cfg.Mode, cfg.Workers, cfg.QueueSize)
 
+	// REST API for observing the gateway. Runs in its own goroutine and shuts down when
+	// ctx is cancelled, so it joins the graceful-shutdown story.
+	api := gateway.NewAPI(st, q)
+	go func() {
+		if err := api.Serve(ctx, cfg.HTTPAddr); err != nil {
+			log.Printf("http: %v", err)
+		}
+	}()
+	log.Printf("gateway: http on %s (/health /stats /telemetry/latest?device_id=drone-1)", cfg.HTTPAddr)
+
 	// Graceful shutdown, in order:
 	<-ctx.Done()     // 1. Ctrl-C fired
 	producers.Wait() // 2. stop producers

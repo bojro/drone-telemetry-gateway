@@ -16,6 +16,7 @@ type Config struct {
 	PostgresURL string // used in full mode
 	MQTTBroker  string // full mode: gateway subscribes here, simulator publishes here
 	MQTTTopic   string
+	HTTPAddr    string // REST API + metrics listen address
 }
 
 func Load() Config {
@@ -28,6 +29,7 @@ func Load() Config {
 		PostgresURL: env("POSTGRES_URL", "postgres://gateway:gateway@localhost:5432/gateway?sslmode=disable"),
 		MQTTBroker:  env("MQTT_BROKER", "tcp://localhost:1883"),
 		MQTTTopic:   env("MQTT_TOPIC", "telemetry"),
+		HTTPAddr:    env("HTTP_ADDR", ":8080"),
 	}
 }
 
