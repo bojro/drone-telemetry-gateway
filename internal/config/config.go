@@ -14,6 +14,8 @@ type Config struct {
 	Workers     int    // worker-pool size
 	DropOnFull  bool   // queue policy: true = drop when full, false = block (backpressure)
 	PostgresURL string // used in full mode
+	MQTTBroker  string // full mode: gateway subscribes here, simulator publishes here
+	MQTTTopic   string
 }
 
 func Load() Config {
@@ -24,6 +26,8 @@ func Load() Config {
 		Workers:     envInt("WORKERS", 4),
 		DropOnFull:  env("DROP_ON_FULL", "false") == "true",
 		PostgresURL: env("POSTGRES_URL", "postgres://gateway:gateway@localhost:5432/gateway?sslmode=disable"),
+		MQTTBroker:  env("MQTT_BROKER", "tcp://localhost:1883"),
+		MQTTTopic:   env("MQTT_TOPIC", "telemetry"),
 	}
 }
 
