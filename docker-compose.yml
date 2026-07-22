@@ -15,3 +15,10 @@ services:
       interval: 2s
       timeout: 3s
       retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883" # MQTT default port
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
