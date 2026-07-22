@@ -42,18 +42,29 @@ func main() {
 	// The bounded queue, sized and policy'd from config.
 	q := gateway.NewQueue(cfg.QueueSize, cfg.DropOnFull)
 
-	// The sink enqueues each reading through the queue's policy.
+	// The sink validates at the trust boundary, then enqueues. Invalid readings are
+	// dropped at the door, so nothing downstream ever handles a malformed reading.
 	sink := func(r model.Reading) {
+		if ok, _ := r.Valid(); !ok {
+			return // dropped; Part 07 counts these as a metric
+		}
 		q.Enqueue(ctx, r)
 	}
 
-	// Producer: the simulator, tracked by a WaitGroup so shutdown can wait for it.
-	sim := &source.Simulator{Devices: cfg.Devices, Interval: time.Second}
+	// Producer: in full mode the gateway subscribes to MQTT; in local mode it runs the
+	// in-process simulator. Either way it feeds the same sink. Tracked by a WaitGroup so
+	// shutdown waits for it to stop before the queue is closed.
 	var producers sync.WaitGroup
 	producers.Add(1)
 	go func() {
 		defer producers.Done()
-		sim.Run(ctx, sink)
+		if cfg.Mode == "full" {
+			if err := source.Subscribe(ctx, cfg.MQTTBroker, cfg.MQTTTopic, sink); err != nil {
+				log.Printf("mqtt: %v", err)
+			}
+		} else {
+			(&source.Simulator{Devices: cfg.Devices, Interval: time.Second}).Run(ctx, sink)
+		}
 	}()
 
 	// Worker pool drains the queue into the store.
