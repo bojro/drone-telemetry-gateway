@@ -91,11 +91,30 @@ Ran the full pipeline (MQTT to Postgres) under load, killed Postgres for ~10s, t
 - Peak queue depth: 100 (capacity) — backpressure engaged, the producer blocked rather than the
   queue growing unbounded.
 - Retry attempts: 169. Recovery (backlog fully persisted after Postgres returned): ~16s.
-- Separately, a flood test sustained ~1200 msg/s from 1000 simulated drones with 16 workers, at
-  ~1.3ms average write latency.
+- Separately, sustained write throughput was profiled and tuned; see section 6.
 
 **Reading.** No accepted reading was lost across a database outage: bounded-queue backpressure held
 memory flat while the retry buffer absorbed the failed writes, and the retrier flushed them on
 recovery. "Accepted" is the honest boundary — under backpressure the QoS-0 transport shed some load
 upstream, which is the deliberate transport tradeoff, not a pipeline loss. Recovery time is bounded
 by the serial retrier, the clear next improvement.
+
+## 6. Deployment and throughput tuning
+
+**Deploy.** The whole stack is a multi-stage Docker build (compiled in the Go image, shipped in a
+distroless runtime) run with Docker Compose. I deployed it to an AWS EC2 t3.micro (2 vCPU, ~900 MB)
+where it served live traffic over the public internet (/health, /stats, /telemetry/latest,
+/metrics) and ran through repeated database stop/start cycles without crashing.
+
+**Throughput tuning.** On the t3.micro the write path is I/O-bound: each worker spends most of its
+time waiting on the Postgres INSERT, not on CPU. That means two knobs have to move together — the
+worker count and the pgx connection-pool size. With the pool left at its small default, most workers
+just block waiting for a connection, so adding workers does nothing. Sizing the pool to the worker
+count and running 16 workers sustained ~5,000 writes/s to PostgreSQL at ~3.4 ms average write
+latency. Beyond that the 2 vCPU host became the bottleneck — Postgres and the gateway compete for the
+same two cores.
+
+**Takeaway.** For an I/O-bound write path, throughput is bounded by the number of concurrent database
+connections, so the worker pool and the connection pool must be sized together; more workers than
+connections just moves the wait. These numbers are from a t3.micro; a larger instance would push
+higher.
