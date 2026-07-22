@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/bojro/drone-telemetry-gateway/internal/model"
@@ -22,9 +23,10 @@ type Store interface {
 // MemoryStore is a thread-safe in-memory Store. It keeps the latest reading per device
 // and a running total, so the whole pipeline runs with no external infrastructure.
 type MemoryStore struct {
-	mu     sync.Mutex
-	latest map[string]model.Reading
-	total  int64
+	mu      sync.Mutex
+	latest  map[string]model.Reading
+	total   int64
+	failing bool // when true, Save returns an error (a simulated outage, for tests)
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -32,11 +34,24 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{latest: make(map[string]model.Reading)}
 }
 
+// SetFailing toggles a simulated outage: while true, Save fails, so the retry path can be
+// exercised deterministically in tests.
+func (m *MemoryStore) SetFailing(f bool) {
+	m.mu.Lock()
+	m.failing = f
+	m.mu.Unlock()
+}
+
+var errOutage = errors.New("store: simulated outage")
+
 // Save records a reading as the latest for its device and bumps the total. The ctx is
 // unused here (no real I/O) but is part of the interface for the Postgres implementation.
 func (m *MemoryStore) Save(_ context.Context, r model.Reading) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failing {
+		return errOutage
+	}
 	m.latest[r.DeviceID] = r
 	m.total++
 	return nil
