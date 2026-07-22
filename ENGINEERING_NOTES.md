@@ -61,3 +61,41 @@ WaitGroup so step 2 cannot run before they have stopped.
 channel). Waiting on the workers before closing the queue hangs forever, because their range loops
 never end. Shutdown takes as long as the drain, which is acceptable for a clean stop; a hard-deadline
 variant would add a timeout that force-exits after N seconds.
+
+## 4. Retry manager — surviving a database outage
+
+**Problem.** A transient store failure (Postgres restart, network blip) must not lose the reading
+or crash the process.
+
+**Options.**
+- Drop the failed reading: data loss.
+- Retry immediately in a tight loop: hammers a recovering database (a retry storm that can keep it
+  from coming back) and ties up the worker so the main queue backs up.
+- Buffer failed writes and retry with growing delays.
+
+**Decision.** Failed writes go to a bounded retry buffer; a background loop re-attempts each with
+exponential backoff (100ms doubling to a 10s cap, 12 tries). Submit is non-blocking, so an outage
+cannot back up into the workers and freeze the pipeline.
+
+**Tradeoffs.** Exponential backoff adapts: fast retries for a brief blip, sparse retries for a long
+outage, with no retry storm. The buffer is bounded to avoid relocating the OOM risk to the retry
+path; if it fills during a very long outage the reading is dropped and counted (production would
+dead-letter it to disk for later replay). Recovery is serial — one reading at a time through the
+retrier — which is the recovery-time bottleneck; concurrent retry workers would be the next step.
+
+## 5. Failure experiment (measured)
+
+Ran the full pipeline (MQTT to Postgres) under load, killed Postgres for ~10s, then restored it.
+
+- Messages accepted: 210 — stored in Postgres: 210 — **lost: 0**
+- Peak queue depth: 100 (capacity) — backpressure engaged, the producer blocked rather than the
+  queue growing unbounded.
+- Retry attempts: 169. Recovery (backlog fully persisted after Postgres returned): ~16s.
+- Separately, a flood test sustained ~1200 msg/s from 1000 simulated drones with 16 workers, at
+  ~1.3ms average write latency.
+
+**Reading.** No accepted reading was lost across a database outage: bounded-queue backpressure held
+memory flat while the retry buffer absorbed the failed writes, and the retrier flushed them on
+recovery. "Accepted" is the honest boundary — under backpressure the QoS-0 transport shed some load
+upstream, which is the deliberate transport tradeoff, not a pipeline loss. Recovery time is bounded
+by the serial retrier, the clear next improvement.
