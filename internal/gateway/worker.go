@@ -4,8 +4,8 @@ package gateway
 
 import (
 	"context"
-	"log"
 	"sync"
+	"time"
 
 	"github.com/bojro/drone-telemetry-gateway/internal/model"
 	"github.com/bojro/drone-telemetry-gateway/internal/store"
@@ -19,13 +19,14 @@ type Pool struct {
 	queue   <-chan model.Reading // receive-only: a worker never sends into the queue
 	store   store.Store
 	retrier *Retrier
+	m       *Metrics
 	wg      sync.WaitGroup
 }
 
 // NewPool creates a pool of n workers that drain the queue into the store, diverting
 // failed writes to the retrier.
-func NewPool(n int, queue <-chan model.Reading, s store.Store, r *Retrier) *Pool {
-	return &Pool{n: n, queue: queue, store: s, retrier: r}
+func NewPool(n int, queue <-chan model.Reading, s store.Store, r *Retrier, m *Metrics) *Pool {
+	return &Pool{n: n, queue: queue, store: s, retrier: r, m: m}
 }
 
 // Start launches the n workers. Each drains the queue until it is closed and empty.
@@ -36,17 +37,23 @@ func (p *Pool) Start() {
 	}
 }
 
-// work is one worker. It ranges the queue and saves each reading. A failed write is not
-// lost: it goes to the retrier, which re-attempts it. Only if the retry buffer is full
+// work is one worker. It ranges the queue and saves each reading, measuring the write.
+// A failed write is not lost: it goes to the retrier. Only if the retry buffer is full
 // (a long outage) is the reading genuinely dropped.
 func (p *Pool) work() {
 	defer p.wg.Done()
 	for r := range p.queue {
+		p.m.WorkersBusy.Inc()
+		start := time.Now()
 		// Background, not the shutdown ctx: an accepted reading finishes writing even
 		// during shutdown drain. The shutdown signal stops producers, not in-flight writes.
-		if err := p.store.Save(context.Background(), r); err != nil {
+		err := p.store.Save(context.Background(), r)
+		p.m.WriteLatency.Observe(time.Since(start).Seconds())
+		p.m.WorkersBusy.Dec()
+		p.m.QueueDepth.Set(float64(len(p.queue)))
+		if err != nil {
 			if !p.retrier.Submit(r) {
-				log.Printf("retry buffer full, dropping reading from %s", r.DeviceID)
+				p.m.Dropped.Inc() // retry buffer full too: genuine loss
 			}
 		}
 	}

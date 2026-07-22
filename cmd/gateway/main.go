@@ -16,6 +16,8 @@ import (
 	"github.com/bojro/drone-telemetry-gateway/internal/model"
 	"github.com/bojro/drone-telemetry-gateway/internal/source"
 	"github.com/bojro/drone-telemetry-gateway/internal/store"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -24,6 +26,10 @@ func main() {
 	// ctx's Done() channel closes on Ctrl-C (SIGINT/SIGTERM).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Metrics registry, shared by the instruments and the /metrics endpoint.
+	reg := prometheus.NewRegistry()
+	metrics := gateway.NewMetrics(reg)
 
 	// Store: memory (local) or Postgres (full), selected by MODE. Both satisfy the same
 	// Store interface, so nothing below this block cares which one it is.
@@ -40,15 +46,18 @@ func main() {
 	defer st.Close()
 
 	// The bounded queue, sized and policy'd from config.
-	q := gateway.NewQueue(cfg.QueueSize, cfg.DropOnFull)
+	q := gateway.NewQueue(cfg.QueueSize, cfg.DropOnFull, metrics)
 
 	// The sink validates at the trust boundary, then enqueues. Invalid readings are
-	// dropped at the door, so nothing downstream ever handles a malformed reading.
+	// counted and dropped at the door; accepted readings count as messages.
 	sink := func(r model.Reading) {
 		if ok, _ := r.Valid(); !ok {
-			return // dropped; Part 07 counts these as a metric
+			metrics.ValidationF.Inc()
+			return
 		}
-		q.Enqueue(ctx, r)
+		if q.Enqueue(ctx, r) {
+			metrics.Messages.Inc()
+		}
 	}
 
 	// Producer: in full mode the gateway subscribes to MQTT; in local mode it runs the
@@ -69,23 +78,23 @@ func main() {
 
 	// Retry manager: absorbs failed writes so a database outage loses no data. Runs in
 	// its own goroutine; workers hand failed saves to it.
-	retrier := gateway.NewRetrier(cfg.QueueSize*4, st)
+	retrier := gateway.NewRetrier(cfg.QueueSize*4, st, metrics)
 	go retrier.Run(ctx)
 
 	// Worker pool drains the queue into the store, diverting failed writes to the retrier.
-	pool := gateway.NewPool(cfg.Workers, q.C(), st, retrier)
+	pool := gateway.NewPool(cfg.Workers, q.C(), st, retrier, metrics)
 	pool.Start()
 	log.Printf("gateway: mode=%s workers=%d queue=%d (Ctrl-C to stop)", cfg.Mode, cfg.Workers, cfg.QueueSize)
 
-	// REST API for observing the gateway. Runs in its own goroutine and shuts down when
-	// ctx is cancelled, so it joins the graceful-shutdown story.
-	api := gateway.NewAPI(st, q)
+	// REST API + /metrics for observing the gateway. Runs in its own goroutine and shuts
+	// down when ctx is cancelled, so it joins the graceful-shutdown story.
+	api := gateway.NewAPI(st, q, reg)
 	go func() {
 		if err := api.Serve(ctx, cfg.HTTPAddr); err != nil {
 			log.Printf("http: %v", err)
 		}
 	}()
-	log.Printf("gateway: http on %s (/health /stats /telemetry/latest?device_id=drone-1)", cfg.HTTPAddr)
+	log.Printf("gateway: http on %s (/health /stats /telemetry/latest /metrics)", cfg.HTTPAddr)
 
 	// Graceful shutdown, in order:
 	<-ctx.Done()     // 1. Ctrl-C fired

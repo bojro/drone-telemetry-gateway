@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/bojro/drone-telemetry-gateway/internal/model"
 )
@@ -13,13 +12,13 @@ import (
 type Queue struct {
 	ch         chan model.Reading
 	dropOnFull bool
-	dropped    atomic.Int64
+	m          *Metrics
 }
 
 // NewQueue builds a bounded queue of the given capacity. With dropOnFull=false (the
 // default) a full queue blocks the producer; with true it drops the reading and counts it.
-func NewQueue(capacity int, dropOnFull bool) *Queue {
-	return &Queue{ch: make(chan model.Reading, capacity), dropOnFull: dropOnFull}
+func NewQueue(capacity int, dropOnFull bool, m *Metrics) *Queue {
+	return &Queue{ch: make(chan model.Reading, capacity), dropOnFull: dropOnFull, m: m}
 }
 
 // Enqueue applies the full-queue policy. It returns false only when a reading was dropped.
@@ -27,15 +26,17 @@ func (q *Queue) Enqueue(ctx context.Context, r model.Reading) bool {
 	if q.dropOnFull {
 		select {
 		case q.ch <- r:
+			q.m.QueueDepth.Set(float64(len(q.ch)))
 			return true
 		default: // queue full -> drop and count, never block
-			q.dropped.Add(1)
+			q.m.Dropped.Inc()
 			return false
 		}
 	}
 	// backpressure: block until a slot frees, or bail if we're shutting down
 	select {
 	case q.ch <- r:
+		q.m.QueueDepth.Set(float64(len(q.ch)))
 		return true
 	case <-ctx.Done():
 		return false
@@ -50,6 +51,3 @@ func (q *Queue) Close() { close(q.ch) }
 
 // Depth reports how many readings are currently buffered.
 func (q *Queue) Depth() int { return len(q.ch) }
-
-// Dropped reports how many readings were discarded under the drop policy.
-func (q *Queue) Dropped() int64 { return q.dropped.Load() }

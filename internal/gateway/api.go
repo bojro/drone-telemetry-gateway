@@ -1,5 +1,6 @@
 // REST API for observing the gateway, using net/http only (no framework — for a handful
-// of read-only endpoints the standard library is cleaner and shows the primitives).
+// of read-only endpoints the standard library is cleaner and shows the primitives). Also
+// serves /metrics for Prometheus to scrape.
 package gateway
 
 import (
@@ -9,15 +10,19 @@ import (
 	"time"
 
 	"github.com/bojro/drone-telemetry-gateway/internal/store"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type API struct {
 	store store.Store
 	queue *Queue
+	reg   *prometheus.Registry
 }
 
-func NewAPI(s store.Store, q *Queue) *API {
-	return &API{store: s, queue: q}
+func NewAPI(s store.Store, q *Queue, reg *prometheus.Registry) *API {
+	return &API{store: s, queue: q, reg: reg}
 }
 
 // Handler wires the routes. Each handler reads current state and writes a JSON response.
@@ -45,6 +50,9 @@ func (a *API) Handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, reading)
 	})
+
+	// Prometheus scrape endpoint, served from our registry.
+	mux.Handle("/metrics", promhttp.HandlerFor(a.reg, promhttp.HandlerOpts{}))
 
 	return mux
 }

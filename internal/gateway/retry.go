@@ -16,16 +16,18 @@ import (
 type Retrier struct {
 	buf      chan model.Reading
 	store    store.Store
+	m        *Metrics
 	base     time.Duration // first backoff delay
 	max      time.Duration // cap on the backoff delay
 	maxTries int           // give up after this many attempts
 }
 
 // NewRetrier builds a retrier with a bounded buffer of the given size.
-func NewRetrier(size int, s store.Store) *Retrier {
+func NewRetrier(size int, s store.Store, m *Metrics) *Retrier {
 	return &Retrier{
 		buf:      make(chan model.Reading, size),
 		store:    s,
+		m:        m,
 		base:     100 * time.Millisecond,
 		max:      10 * time.Second,
 		maxTries: 12,
@@ -66,11 +68,12 @@ func (r *Retrier) attempt(ctx context.Context, reading model.Reading) {
 			return // shutdown wins over waiting out a backoff
 		case <-time.After(r.backoff(try)):
 		}
+		r.m.Retries.Inc()
 		if err := r.store.Save(ctx, reading); err == nil {
 			return // recovered
 		}
 	}
-	// exhausted: in production this would dead-letter; here it's a counted loss (Part 07).
+	// exhausted: in production this would dead-letter; here it's a counted loss.
 }
 
 // backoff returns base * 2^try, capped at max: 100ms, 200ms, 400ms, ... up to 10s.
